@@ -1,0 +1,97 @@
+version: "3.9"
+
+services:
+  # PostgreSQL Database
+  db:
+    image: postgres:16-alpine
+    container_name: mgmtsays-db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-mgmtsays}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mgmtsays_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-mgmtsays}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/db/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mgmtsays}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - mgmtsays-network
+
+  # ChromaDB Vector Store
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: mgmtsays-chromadb
+    environment:
+      CHROMA_SERVER_AUTH_CREDENTIALS_PROVIDER: "chromadb.auth.token.TokenConfigServerAuthCredentialsProvider"
+      CHROMA_SERVER_AUTH_TOKEN_TRANSPORT_HEADER: "Authorization"
+      CHROMA_SERVER_AUTH_CREDENTIALS: ${CHROMA_AUTH_TOKEN:-dev_token}
+    volumes:
+      - chroma_data:/chroma/chroma
+    ports:
+      - "8000:8000"
+    networks:
+      - mgmtsays-network
+
+  # FastAPI Backend
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: mgmtsays-backend
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-mgmtsays}:${POSTGRES_PASSWORD:-mgmtsays_dev}@db:5432/${POSTGRES_DB:-mgmtsays}
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+      - CHROMA_AUTH_TOKEN=${CHROMA_AUTH_TOKEN:-dev_token}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - ENVIRONMENT=development
+    volumes:
+      - ./backend/src:/app/src
+      - ./backend/tests:/app/tests
+      - upload_data:/app/uploads
+    ports:
+      - "8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+      chromadb:
+        condition: service_started
+    networks:
+      - mgmtsays-network
+    command: uvicorn src.main:app --host 0.0.0.0 --port 8080 --reload
+
+  # React Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: development
+    container_name: mgmtsays-frontend
+    environment:
+      - VITE_API_URL=http://localhost:8080
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+      - /app/node_modules
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+    networks:
+      - mgmtsays-network
+    command: npm run dev -- --host
+
+volumes:
+  postgres_data:
+  chroma_data:
+  upload_data:
+
+networks:
+  mgmtsays-network:
+    driver: bridge
